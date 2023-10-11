@@ -1,0 +1,60 @@
+#pragma kernel CS_RectIn
+int idxStart;
+int idxEnd;
+float4 rect;
+
+StructuredBuffer<float4x4> SCV_Buffer;
+StructuredBuffer<float3> pos_Buffer;
+StructuredBuffer<int> active_Buffer;
+StructuredBuffer<int> has_input_Buffer;
+
+RWStructuredBuffer<int> inRect_Buffer;
+
+[numthreads(64, 1, 1)]
+void CS_RectIn(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint idx = gid.x * 64 + gtid.x;
+    
+    int isActive = 0;
+    //if(active_Buffer[idx] == 1)
+    if (active_Buffer[idx] == 1 && has_input_Buffer[idx] == 1)
+    {
+        isActive = 1;
+    }
+    
+    int inRect = 0;
+    
+    if(isActive == 1)
+    {
+        if (idxStart <= idx && idx <= idxEnd)
+        {
+            float3 posS;
+            float3 posW = pos_Buffer[idx];
+        
+            float4x4 S = SCV_Buffer[0];
+            float4x4 CV = SCV_Buffer[1];
+        
+            float4 vec = mul(CV, float4(posW, 1.0f));
+            vec = (1.0f / vec.w) * vec;
+            posS = mul(S, vec).xyz;
+        
+        
+            {
+                float x = rect.x;
+                float y = rect.y;
+                float w = rect.z;
+                float h = rect.w;
+            
+                if (x <= posS.x && posS.x <= x + w)
+                {
+                    if (y <= posS.y && posS.y <= y + h)
+                    {
+                        inRect = 1;
+                    }
+                }
+            }
+        }
+    }
+           
+    inRect_Buffer[idx] = inRect;
+}

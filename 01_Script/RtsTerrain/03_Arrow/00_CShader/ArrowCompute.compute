@@ -1,0 +1,245 @@
+#pragma kernel ArrowCurveCompute
+#pragma kernel ArrowBoneCompute
+#pragma kernel ArrowVertexCompute
+
+#include "../../../Utility/00_CShader/UtilityCS.hlsl"
+#define BoneCount 25  //13
+#define vtCount 1024  //25 * 24 = 600
+
+struct ArrowConst
+{
+    bool active;
+        
+    float u;    
+    float3 sca;
+    
+    float3 pi;    
+    float3 p0;    
+    float3 p1;
+};
+
+struct ArrowCurveOut
+{    
+    float3 dp0;    
+    float3 dp1;
+    
+    float arcLength;    
+    float4x4 L;
+};
+
+struct ArrowBoneOut
+{   
+    int cIndex;    
+    int bIndex;
+   
+    float4x4 bone;    
+    float4x4 boneIT;
+   
+    float3 pos;
+    float4 rot;
+};
+
+struct ArrowOut
+{
+    float4 pos;
+    float4 rot;    
+};
+
+struct VertexIn
+{
+    float3 posL;
+    float3 normalL;
+    float4 tangentL;
+    int4 boneI;
+    float4 boneW;
+};
+
+struct VertexOut
+{
+    float3 posW;
+    float3 normalW;
+    float4 tangentW;
+    int4 boneI;
+};
+
+StructuredBuffer<ArrowConst> arrowConst;
+Buffer<float> boneZ;
+StructuredBuffer<VertexIn> vIn;
+
+RWStructuredBuffer<ArrowCurveOut> curves;
+RWStructuredBuffer<ArrowBoneOut> bones;
+RWStructuredBuffer<ArrowOut> arrowData;
+RWStructuredBuffer<VertexOut> vOut;
+
+[numthreads(1, 1, 1)]
+void ArrowCurveCompute(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{
+    int i = gid.x;
+    ArrowConst constData = arrowConst[i];
+   
+    if (constData.active)
+    {
+        float u = constData.u;               
+        float arrowLength;
+        if (0.0f <= u && u <= 1.0f)
+        {
+            ArrowCurveOut curveData;
+
+            float3 p0 = constData.p0;
+            float3 p1 = constData.p1;
+            float3 pi = constData.pi;
+
+            float3 vec = f3zero;            
+            vec = p1 - p0;            
+            float3 dir0 = float3(vec.x, 0.0f, vec.z);
+            vec = pi - p0;
+            float3 dir1 =float3(vec.x, 0.0f, vec.z);
+            
+            float3 dir2 = normalize(dir0);
+            float3 dir3 = dir1 - dir2 * dot(dir2, dir1);
+            float up = length(dir0);                      
+
+            float3 dp0 = float3(dir0.x, +up, dir0.z) + (-2.0f) * dir3;
+            float3 dp1 = float3(dir0.x, -up, dir0.z) + (+2.0f) * dir3;                     
+
+            float3x4 GM = CurveHermite::GetGM(p0, p1, dp0, dp1);
+            arrowLength = CurveHermite::GetArcLengthGM(GM, 0.001f);
+            float3 sca = arrowConst[i].sca;
+
+            float4x4 m0 = f4x4I;            
+            m0.v4c0.x = sca.x;
+            m0.v4c1.y = sca.y;
+            m0.v4c2.z = sca.z;
+            m0.v4c3.z = arrowLength * u;
+
+            float4x4 m1 = f4x4I;            
+            m1.v4c2.z = 1.0f / arrowLength;
+
+            m0 = mul(m1, m0);
+
+            curveData.dp0 = dp0;
+            curveData.dp1 = dp1;
+            curveData.arcLength = arrowLength;
+            curveData.L = m0;
+
+            curves[i] = curveData;
+            arrowData[i].pos.w = arrowLength;
+        }                    
+    }
+}
+
+[numthreads(BoneCount, 1, 1)]
+void ArrowBoneCompute(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{
+    int j = dtid.x;
+    int i = bones[j].cIndex;
+    int k = bones[j].bIndex;
+    ArrowConst constData = arrowConst[i];
+
+    if (constData.active)
+    {
+        float u = constData.u;
+        if (0.0f <= u && u <= 1.0f)
+        {
+            ArrowCurveOut curveData = curves[i];
+            ArrowBoneOut boneData = bones[j];
+            float bz = boneZ[k];
+
+            float3 p0 = constData.p0;
+            float3 p1 = constData.p1;
+            float3 sca = constData.sca;                       
+
+            float3 dp0 = curveData.dp0;
+            float3 dp1 = curveData.dp1;
+            float4x4 L = curveData.L;           
+
+            float4x4 bone = f4x4I;            
+            float4x4 boneIT = f4x4I;            
+            float4 rot = qI;
+            float3 pos = f3zero;            
+
+            float4 center = float4(0.0f, 0.0f, bz, 1.0f);
+            float l = mul(L, center).z;
+            
+            float3x4 GM = CurveHermite::GetGM(p0, p1, dp0, dp1);
+            pos = CurveHermite::CurveGM(GM, l);
+
+            float3 tangent = CurveHermite::TCurveGM(GM, l);
+            float3 normal =  CurveHermite::NCurveGM(GM, l);
+            float3 bnormal = normalize(cross(tangent, normal));
+            tangent = normalize(tangent);
+            normal = cross(bnormal, tangent);
+                        
+            bone.v4c0 = float4(sca.x * normal, 0.0f);
+            bone.v4c1 = float4(sca.y * bnormal, 0.0f);
+            bone.v4c2 = float4(sca.z * tangent, 0.0f);          
+            bone.v4c3 = float4(pos, 1.0f);            
+            rot = Quaternion::fromMat(normalize(bone.v3c0), normalize(bone.v3c1), normalize(bone.v3c2));
+            
+            float3 sca_r = 1.0f / sca;
+            boneIT.v4c0 = float4(sca_r.x * normal, 0.0f);
+            boneIT.v4c1 = float4(sca_r.y * bnormal, 0.0f);
+            boneIT.v4c2 = float4(sca_r.z * tangent, 0.0f);         
+
+            boneData.bone = bone;
+            boneData.boneIT = boneIT;
+            boneData.rot = rot;
+            boneData.pos = pos;
+
+            bones[j] = boneData;
+            
+            if(k == BoneCount / 2)
+            {
+                arrowData[i].pos.xyz = pos;
+                arrowData[i].rot = rot;
+            }
+        }
+    }
+}
+
+float4 countInfo;
+
+[numthreads(vtCount, 1, 1)]
+void ArrowVertexCompute(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{   
+    uint vtxCount = (uint) countInfo[0];   
+    uint boneCount = (uint) countInfo[1];    
+    
+    int i = 0;
+    uint iid = gid.x;
+    uint vgid = gid.y;
+    float3 posW = float3(0.0f, 0.0f, 0.0f);
+    float3 normalW = float3(0.0f, 0.0f, 0.0f);
+    float3 tangentW = float3(0.0f, 0.0f, 0.0f);
+    
+    ArrowConst constData = arrowConst[iid];
+                
+    if (constData.active)
+    {
+        uint vtxIdx = vgid * vtCount + gtid.x;               
+               
+        if (vtxIdx < vtxCount)
+        {
+            VertexIn vin = vIn[vtxIdx];
+    
+            uint boneI = vin.boneI.x;
+
+            boneI += (iid * boneCount);
+           
+            {
+                ArrowBoneOut b = bones[boneI];
+                float4x4 W = b.bone;
+                float3x3 W_IT = (float3x3) b.boneIT;
+                posW = mul(W, float4(vin.posL, 1.0f)).xyz;
+                normalW = mul((float3x3) W_IT, vin.normalL);
+                tangentW = mul((float3x3) W_IT, vin.tangentL.xyz);
+            }
+
+            uint idxOut = iid * vtxCount + vtxIdx;
+            vOut[idxOut].posW = posW;
+            vOut[idxOut].normalW = normalW;
+            vOut[idxOut].tangentW = float4(tangentW, 0.0f);
+            vOut[idxOut].boneI.x = vin.boneI.x;
+        }
+    }
+}

@@ -1,0 +1,650 @@
+#include "../../../Utility/00_CShader/UtilityCS.hlsl"
+
+#pragma kernel CS_PVF
+#pragma kernel CS_OVF
+
+#pragma kernel CS_PVF_Vertex
+#pragma kernel CS_OVF_Vertex
+#pragma kernel CS_Sphere_Vertex
+#pragma kernel CS_SVF_Vertex
+
+#pragma kernel CS_PVF_Cull_Sphere
+#pragma kernel CS_OVF_Cull_Sphere
+#pragma kernel CS_SVF_Cull_Sphere
+
+#pragma kernel CS_Sphere_Center
+
+#pragma kernel CS_Unit_TessInfo
+
+#pragma multi_compile_local __ DEBUG_TESS
+
+//#define PvfNum 1//1
+//#define OvfNum 1//4
+
+#define SpUnum 24
+#define SpVnum 25  // 12 * 2 + 1 = 25
+
+#define VfVtxCount 24
+#define SpCountGroup 8
+
+struct Info_VF
+{
+    float4 fi;
+    float3 pos;
+    float4 rot;
+};
+
+
+StructuredBuffer<Info_VF> info_pvf_Buffer;
+StructuredBuffer<Info_VF> info_ovf_Buffer;
+
+RWStructuredBuffer<float4> plane_pvf_Buffer;
+RWStructuredBuffer<float4> plane_ovf_Buffer;
+
+groupshared float3x3 R;
+groupshared float4x2 plane_Pvf[6];
+groupshared float4x2 plane_Ovf[6];
+
+int pvfCount;
+int ovfCount;
+int pvfOffset;
+int ovfOffset;
+
+[numthreads(1, 1, 6)]
+void CS_PVF(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidy = pvfOffset + gid.y;
+    
+    Info_VF vf = info_pvf_Buffer[_gidy];
+    
+    float4 fi = vf.fi;
+    float3 pos = vf.pos;
+    float4 rot = vf.rot;
+    
+    float fov = fi.x;
+    float aspect = fi.y;
+    float near = fi.z;
+    float far = fi.w;
+    
+    int i = 0;
+    if (gidx == 0)
+    {
+        R = Quaternion::toMat(rot);
+        float3 dirZ = R.v3c2;
+                
+        float tany = tan(radians(0.5f * fov));
+        float tanx = aspect * tany;
+        
+        plane_Pvf[0].v3c0 = float3(+1.0f, +0.0f, -tanx);
+        plane_Pvf[1].v3c0 = float3(-1.0f, +0.0f, -tanx);
+        plane_Pvf[2].v3c0 = float3(+0.0f, +1.0f, -tany);
+        plane_Pvf[3].v3c0 = float3(+0.0f, -1.0f, -tany);
+        plane_Pvf[4].v3c0 = float3(+0.0f, +0.0f, +1.0f);
+        plane_Pvf[5].v3c0 = float3(+0.0f, +0.0f, -1.0f);
+        
+        plane_Pvf[0].v3c1 = f3zero;
+        plane_Pvf[1].v3c1 = f3zero;
+        plane_Pvf[2].v3c1 = f3zero;
+        plane_Pvf[3].v3c1 = f3zero;
+        plane_Pvf[4].v3c1 = float3(0.0f, 0.0f, far);
+        plane_Pvf[5].v3c1 = float3(0.0f, 0.0f, near);
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float4 p;
+        p.xyz = mul(R, normalize(plane_Pvf[gtid.z].v3c0));
+        //p.w = -mul(p.xyz, pos + R.v3c2 * planePvf[gtid.y][gtid.z].v3c1.z);
+        p.w = -dot(p.xyz, pos + R.v3c2 * plane_Pvf[gtid.z].v3c1.z);
+                       
+        plane_Pvf[gtid.z].v4c0 = p;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        plane_pvf_Buffer[_gidy * 6 + gtid.z] = plane_Pvf[gtid.z].v4c0;
+      //plane_pvf_Buffer[gid.x * PvfNum * 6 + gtid.y * 6 + gtid.z] = float4(1.0f, 1.0f, 1.0f, 1.0f);
+      //plane_pvf_Buffer[gid.x * PvfNum * 6 + gtid.y * 6 + gtid.z] = float4(pos, 1.0f);
+    }
+        
+}
+
+[numthreads(1, 1, 6)]
+void CS_OVF(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidy = ovfOffset + gid.y;
+    
+    Info_VF vf = info_ovf_Buffer[_gidy];
+    
+    float4 fi = vf.fi;
+    float3 pos = vf.pos;
+    float4 rot = vf.rot;
+    
+    float hv = fi.x;
+    float aspect = fi.y;
+    float near = fi.z;
+    float far = fi.w;
+    
+    int i = 0;
+    
+    if (gidx == 0)
+    {
+        R = Quaternion::toMat(rot);
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    if (gidx == 0)
+    {
+        float nx = hv * aspect;
+        float ny = hv;
+        float nz = (far - near) * 0.5f;
+        
+        plane_Ovf[0].v3c0 = float3(+1.0f, +0.0f, +0.0f);
+        plane_Ovf[1].v3c0 = float3(-1.0f, +0.0f, +0.0f);
+        plane_Ovf[2].v3c0 = float3(+0.0f, +1.0f, +0.0f);
+        plane_Ovf[3].v3c0 = float3(+0.0f, -1.0f, +0.0f);
+        plane_Ovf[4].v3c0 = float3(+0.0f, +0.0f, +1.0f);
+        plane_Ovf[5].v3c0 = float3(+0.0f, +0.0f, -1.0f);
+             
+        plane_Ovf[0].v3c1 = float3(+nx, 0.0f, 0.0f);
+        plane_Ovf[1].v3c1 = float3(-nx, 0.0f, 0.0f);
+        plane_Ovf[2].v3c1 = float3(0.0f, +ny, 0.0f);
+        plane_Ovf[3].v3c1 = float3(0.0f, -ny, 0.0f);
+        plane_Ovf[4].v3c1 = float3(0.0f, 0.0f, +nz);
+        plane_Ovf[5].v3c1 = float3(0.0f, 0.0f, -nz);
+    }
+   
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float4 p;
+        p.xyz = mul(R, plane_Ovf[gtid.z].v3c0);
+        //p.w = -mul(p.xyz,
+        //    pos +
+        //    R.v3c2 * (far + near) * 0.5f +
+        //    mul(R, planeOvf[gtid.y][gtid.z].v3c1));
+        p.w = -dot(p.xyz,
+            pos +
+            R.v3c2 * (far + near) * 0.5f +
+            mul(R, plane_Ovf[gtid.z].v3c1));
+                       
+        plane_Ovf[gtid.z].v4c0 = p;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        plane_ovf_Buffer[_gidy * 6 + gtid.z] = plane_Ovf[gtid.z].v4c0;
+    }
+        
+}
+
+struct Vertex
+{
+    float3 position;
+    float3 normal;
+};
+
+StructuredBuffer<Vertex> vf_vertex_Buffer;
+
+RWStructuredBuffer<Vertex> pvf_vertex_Buffer;
+RWStructuredBuffer<Vertex> ovf_vertex_Buffer;
+
+groupshared float4x4 vfMat;
+groupshared float3 pvfNom[4];
+groupshared Vertex vfVtx[VfVtxCount];
+
+[numthreads(VfVtxCount, 1, 1)]
+void CS_PVF_Vertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidx = pvfOffset + gid.x;
+    
+    Info_VF vf = info_pvf_Buffer[_gidx];
+    Vertex vOut;
+    
+    float4 fi = vf.fi;
+    float3 pos = vf.pos;
+    float4 rot = vf.rot;
+    
+    float fov = fi.x;
+    float aspect = fi.y;
+    float near = fi.z;
+    float far = fi.w;
+                
+    int i = 0;
+    if (gidx == 0)
+    {
+        float4x4 m = f4x4Zero;
+        m._m11 = tan(radians(fov / 2.0f));
+        m._m00 = aspect * m._m11;
+        m._m22 = 0.0f;
+        m._m23 = 1.0f;
+        m._m32 = -(far - near) / (2 * far * near);
+        m._m33 = +(far + near) / (2 * far * near);
+        
+        pvfNom[0] = float3(+1.0f, +0.0f, -m._m00);
+        pvfNom[1] = float3(-1.0f, +0.0f, -m._m00);
+        pvfNom[2] = float3(+0.0f, +1.0f, -m._m11);
+        pvfNom[3] = float3(+0.0f, -1.0f, -m._m11);
+    
+        R = Quaternion::toMat(rot);
+        vfMat = m;
+    }
+               
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float4x4 m = vfMat;
+        float3 p = vf_vertex_Buffer[gtid.x].position;
+        float3 n = vf_vertex_Buffer[gtid.x].normal;
+        
+        float4 vec = float4(2.0f * p, 1.0f);
+        vec = mul(m, vec);
+        vec = (1.0f / vec.w) * vec;
+        p = vec.xyz;
+        
+        float3 nr = pvfNom[0];
+        float3 nl = pvfNom[1];
+        float3 nu = pvfNom[2];
+        float3 nd = pvfNom[3];
+        
+        if (dot(n, float3(+1.0f, +0.0f, +0.0f)) > 0.0f)
+        {
+            n = nr;
+        }
+        else if (dot(n, float3(-1.0f, +0.0f, +0.0f)) > 0.0f)
+        {
+            n = nl;
+        }
+        else if (dot(n, float3(+0.0f, +1.0f, +0.0f)) > 0.0f)
+        {
+            n = nu;
+        }
+        else if (dot(n, float3(+1.0f, -1.0f, +0.0f)) > 0.0f)
+        {
+            n = nd;
+        }
+        
+        vOut.position = pos + mul(R, p);
+        vOut.normal = mul(R, n);
+        vfVtx[gtid.x] = vOut;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    pvf_vertex_Buffer[_gidx * VfVtxCount + gtid.x] = vfVtx[gtid.x];
+                
+}
+
+
+[numthreads(VfVtxCount, 1, 1)]
+void CS_OVF_Vertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidx = ovfOffset + gid.x;
+    
+    Info_VF vf = info_ovf_Buffer[_gidx];
+    Vertex vOut;
+    
+    float4 fi = vf.fi;
+    float3 pos = vf.pos;
+    float4 rot = vf.rot;
+    
+    float hv = fi.x;
+    float aspect = fi.y;
+    float near = fi.z;
+    float far = fi.w;
+                
+    //near = 0;
+    int i = 0;
+    if (gidx == 0)
+    {
+        float4x4 m = f4x4Zero;
+        m._m00 = aspect * hv;
+        m._m11 = hv;
+        m._m22 = (far - near) * 0.5f;
+        m._m23 = (far + near) * 0.5f;
+        m._m33 = 1.0f;
+    
+        R = Quaternion::toMat(rot);
+        vfMat = m;
+    }
+               
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float4x4 m = vfMat;
+        float3 p = vf_vertex_Buffer[gtid.x].position;
+        float3 n = vf_vertex_Buffer[gtid.x].normal;
+        
+        float4 vec = float4(2.0f * p, 1.0f);
+        vec = mul(m, vec);
+        p = vec.xyz;
+        
+        vOut.position = pos + mul(R, p);
+        vOut.normal = mul(R, n);
+        vfVtx[gtid.x] = vOut;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    ovf_vertex_Buffer[_gidx * VfVtxCount + gtid.x] = vfVtx[gtid.x];
+}
+
+
+StructuredBuffer<float4> sphere_In_Buffer;
+StructuredBuffer<float4x4> sphere_trM_Buffer;
+RWStructuredBuffer<float4> sphere_Out_Buffer;
+
+[numthreads(64, 1, 1)] //
+void CS_Sphere_Center(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint idx = gid.x * 64 + gtid.x;
+    
+    float4 spOut = sphere_In_Buffer[idx];
+    float4x4 M = sphere_trM_Buffer[idx];
+       
+    float3 pos = M.v3c0;
+    float4 rot = M.v4c1;
+    float3 sca = M.v3c2;
+    
+    float3x3 R = Quaternion::toMat(rot);
+    
+    spOut.xyz = pos + mul(R, spOut.xyz);
+    
+    sphere_Out_Buffer[idx] = spOut;        
+}
+
+
+StructuredBuffer<float4> sphere_Buffer;
+StructuredBuffer<Vertex> sphere_vertex_In_Buffer;
+
+RWStructuredBuffer<Vertex> sphere_vertex_Out_Buffer;
+
+
+[numthreads(SpVnum, SpUnum, 1)]
+void CS_Sphere_Vertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    //float4 sp = sphere_Buffer[gid.x];
+    float4 sp = sphere_Out_Buffer[gid.x];
+    float3 pos = sp.xyz;
+    float r = sp.w;
+           
+    Vertex vIn = sphere_vertex_In_Buffer[gtid.x * SpUnum + gtid.y];
+    Vertex vOut;
+    
+    vOut.position = pos + r * vIn.position;
+    vOut.normal = vIn.normal;
+    
+    //vOut.position = float3(8.0f, 8.0f, 8.0f);
+    //vOut.normal = float3(8.0f, 8.0f, 8.0f);
+    
+    sphere_vertex_Out_Buffer[gid.x * SpVnum * SpUnum + gtid.x * SpUnum + gtid.y] = vOut;
+}
+
+
+float4 audioCamSphere;
+float4 audioCamRot;
+RWStructuredBuffer<Vertex> svf_vertex_Buffer;
+
+groupshared float4 sh_rot;
+
+[numthreads(SpVnum, SpUnum, 1)]
+void CS_SVF_Vertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    //float4 sp = sphere_Buffer[gid.x];
+    float4 sp = audioCamSphere;
+    float3 pos = sp.xyz;
+    float r = sp.w;
+    
+    float4 rot = audioCamRot;
+    //float3x3 R = Quaternion::toMat(rot);
+    if (gidx == 0)
+    {
+        sh_rot = Quaternion::mul(rot, Quaternion::axisAngle(float3(1.0f, 0.0f, 0.0f), radians(90.0f)));
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+           
+    Vertex vIn = sphere_vertex_In_Buffer[gtid.x * SpUnum + gtid.y];
+    Vertex vOut;
+    
+    //vOut.position = pos + r * vIn.position;
+    //vOut.normal = vIn.normal;
+    
+    vOut.position = pos + r * Quaternion::rotate(sh_rot, vIn.position);
+    vOut.normal = Quaternion::rotate(sh_rot, vIn.normal);
+    
+    //vOut.position = float3(8.0f, 8.0f, 8.0f);
+    //vOut.normal = float3(8.0f, 8.0f, 8.0f);
+    
+    svf_vertex_Buffer[gid.x * SpVnum * SpUnum + gtid.x * SpUnum + gtid.y] = vOut;
+}
+
+
+int spCount;
+
+RWTexture3D<float> cullResult_pvf_Texture;
+RWTexture3D<float> cullResult_ovf_Texture;
+
+groupshared int planeOut[SpCountGroup][6];
+groupshared int vfIn[SpCountGroup];
+
+[numthreads(SpCountGroup, 1, 6)] // gid = (96, 1, 1)
+void CS_PVF_Cull_Sphere(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidy = pvfOffset + gid.y;
+    
+    //if (gid.x * 8 + gtid.x < spCount)
+    {
+        float4 pl = plane_pvf_Buffer[_gidy * 6 + gtid.z];
+        //float4 sp = sphere_Buffer[gid.x * 8 + gtid.x];
+        float4 sp = sphere_Out_Buffer[gid.x * 8 + gtid.x];
+        
+        {
+            int isOut = 0;
+            if (dot(pl.xyz, sp.xyz) + pl.w > sp.w)
+            {
+                isOut = 1;
+            }
+            planeOut[gtid.x][gtid.z] = isOut;
+        }
+      
+        GroupMemoryBarrierWithGroupSync();
+    
+        int i = 0;
+        if (gtid.z == 0)
+        {
+            int isIn = 1;
+            for (i = 0; i < 6; i++)
+            {
+                if (planeOut[gtid.x][i] == 1)
+                {
+                    isIn = 0;
+                    break;
+                }
+            }
+        
+            vfIn[gtid.x] = isIn;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+            
+        cullResult_pvf_Texture[uint3(gid.x * SpCountGroup + gtid.x, _gidy, gid.z)] = (float) vfIn[gtid.x];
+        //cullResult_pvf_Texture[uint3(gid.x * 8 + gtid.x, gid.y, gid.z)] = (float) (gid.x * 8 + gtid.x);
+
+    }
+}
+
+
+[numthreads(SpCountGroup, 1, 6)] // gid = (96, 4, 1)
+void CS_OVF_Cull_Sphere(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint _gidy = ovfOffset + gid.y;
+    
+    //if(gid.x * 8 + gtid.x < spCount)
+    {
+        float4 pl = plane_ovf_Buffer[_gidy * 6 + gtid.z];
+        //float4 sp = sphere_Buffer[gid.x * 8 + gtid.x];
+        float4 sp = sphere_Out_Buffer[gid.x * 8 + gtid.x];
+        
+        {
+            int isOut = 0;
+            if (dot(pl.xyz, sp.xyz) + pl.w > sp.w)
+            {
+                isOut = 1;
+            }
+            planeOut[gtid.x][gtid.z] = isOut;
+        }
+        
+        GroupMemoryBarrierWithGroupSync();
+    
+        int i = 0;
+        if (gtid.z == 0)
+        {
+            int isIn = 1;
+            for (i = 0; i < 6; i++)
+            {
+                if (planeOut[gtid.x][i] == 1)
+                {
+                    isIn = 0;
+                    break;
+                }
+            }
+        
+            vfIn[gtid.x] = isIn;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    
+        cullResult_ovf_Texture[uint3(gid.x * SpCountGroup + gtid.x, _gidy, gid.z)] = (float) vfIn[gtid.x];
+    }
+}
+
+
+//float4 audioCamSphere;
+//StructuredBuffer<float4> sphere_Out_Buffer;
+RWStructuredBuffer<float> cullResult_svf_Buffer;
+
+[numthreads(64, 1, 1)] //
+void CS_SVF_Cull_Sphere(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint idx = gid.x * 64 + gtid.x;
+    
+    float4 spOut = sphere_Out_Buffer[idx];    
+    
+    {
+        float3 c0 = audioCamSphere.xyz;
+        float r0 = audioCamSphere.w;
+        
+        float3 c1 = spOut.xyz;
+        float r1 = spOut.w;
+                
+        cullResult_svf_Buffer[idx] = distance(c0, c1) > r0 + r1 ? 1.0f : 0.0f;
+        //cullResult_svf_Buffer[idx] = 0.0f;
+    }
+}
+
+
+//StructuredBuffer<float4> sphere_Out_Buffer;
+StructuredBuffer<float> cullOffset_Buffer;
+RWStructuredBuffer<float4> unit_tess_Buffer; //float4(isIn, idx, dist, count)
+RWStructuredBuffer<float4> unit_tess_debug_Buffer;
+float4 mainCamInfo;
+float4 mainCamDir;
+
+groupshared float4 sh_cam_unit_info[64];
+
+[numthreads(64, 1, 1)] //
+void CS_Unit_TessInfo(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint coffset = (uint) cullOffset_Buffer[gid.x];
+    uint count = (uint) cullOffset_Buffer[gid.x + 1] - coffset;
+    uint idx = coffset + gtid.x;
+    
+    float4 spOut = sphere_Out_Buffer[idx];
+    
+    sh_cam_unit_info[gtid.x] = float4(-1.0f, -1.0f, -1.0f, -1.0f);
+    if (gtid.x < count)
+    {
+        float3x2 ray;
+        ray.v3c0 = mainCamInfo.xyz;
+        ray.v3c1 = mainCamDir.xyz;
+        
+        float4 sphere = spOut;
+        
+        float2 ts;
+        float3x2 ps;
+        float minDist;
+        
+        float bTest = Ray::intersectSphere(ray, sphere, ts, ps, minDist) ? 1.0f : -1.0f;        
+        float dist = minDist;              
+        float _idx = gtid.x;
+        float isIn = 0.0f;
+        
+        sh_cam_unit_info[gtid.x] = float4(isIn, _idx, dist, bTest);
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+//#define DEBUG_TESS
+#if defined(DEBUG_TESS)       
+    unit_tess_debug_Buffer[dtid.x] = sh_cam_unit_info[gtid.x];
+#endif
+          
+    int i = 0;
+    [loop]
+    for (i = 0; i < 6; i++)
+    {
+        if (gidx % (uint) pow(2.0f, (float) i + 1) == 0)
+        {
+            uint offset = (uint) pow(2.0f, (float) i);
+            uint a = gidx;
+            uint b = gidx + offset;
+            
+            float4 ai = sh_cam_unit_info[a];
+            float4 bi = sh_cam_unit_info[b];
+            
+            //ai.w > mainCamDir.w && bi.w < mainCamDir.w
+            if (b < count && bi.w > 0.0f)
+            {
+                if ((ai.w > 0.0f && ai.z > bi.z) ||
+                    (ai.w < 0.0f))
+                {
+                    sh_cam_unit_info[a] = sh_cam_unit_info[b];
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    
+    //{
+    //    unit_tess_debug_Buffer[dtid.x] = sh_cam_unit_info[gtid.x];
+    //}
+    
+    if (gidx == 0)
+    {
+        float4 minInfo = sh_cam_unit_info[0];
+        float dist = minInfo.z;
+        float bTest = minInfo.w;
+        float isIn = 0.0f;
+        
+        if (dist < mainCamInfo.w && bTest > 0.0f)
+        {
+            isIn = 1.0f;
+        }
+        minInfo.x = isIn;
+        
+        unit_tess_Buffer[gid.x] = minInfo;
+        //unit_tess_Buffer[gid.x] = float4(100.0f, 200.0f, 300.0f, 400.0f);
+    }           
+        
+    //{
+    //    unit_tess_debug_Buffer[dtid.x] = sh_cam_unit_info[gtid.x];
+    //}
+}
+
+
+

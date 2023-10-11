@@ -1,0 +1,365 @@
+#include "../../../Utility/00_CShader/UtilityCS.hlsl"
+//#pragma kernel CS_NH
+#pragma kernel CS_TrW
+#pragma kernel CS_TargetPos
+#pragma kernel CS_TargetEnemy
+
+#define UNIT_COUNT 1024
+#define BINARY_COUNT 10
+
+
+StructuredBuffer<float4> posW;
+Texture2D<float4> alphaTex;
+Texture2D holeTex;
+
+float4 texSize;
+float4 terrainSize;
+
+float4 t1_t0;
+float4x4 T;
+
+StructuredBuffer<float4x4> trM_Buffer;
+
+RWStructuredBuffer<float4x4> trW_Buffer;
+RWStructuredBuffer<float4> circle_Buffer;
+RWStructuredBuffer<float4> terrainArea_Buffer;
+
+[numthreads(64, 1, 1)] //4 * 64 = 256 (4, 1, 1)
+void CS_TrW(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint id = gid.x * 64 + gtid.x;
+    float4x4 M = trM_Buffer[id];
+    float4 circle = circle_Buffer[id];
+    float3 c;
+    float r = circle.w;
+    
+    float3 pos = M.v3c0;
+    float4 rot = M.v4c1;
+    float3 sca = M.v3c2;
+       
+    c = pos;
+    
+    M = Transform::GetW(pos, rot, sca);
+          
+    trW_Buffer[id] = M;
+    circle_Buffer[id] = float4(c, r);
+    
+    uint2 posT = Terrain::GetHMapPos(pos, T, t1_t0.xy);
+    float4 tArea = Terrain::GetTerrainArea(posT, alphaTex);
+    terrainArea_Buffer[id] = tArea;
+}
+
+
+int count;
+
+Texture3D<float4> normalHeight_Tex;
+//RWStructuredBuffer<float4x4> trW_Buffer;
+//StructuredBuffer<float4> circle_Buffer;
+StructuredBuffer<float3> block_Buffer;
+StructuredBuffer<int> random_Buffer;
+StructuredBuffer<int> active_Buffer;
+StructuredBuffer<int> state_Buffer;
+StructuredBuffer<float3> refTargetPos_Buffer;
+
+//Texture2D<float4> alphaTex;
+//float4 t1_t0;
+//float4x4 T;
+
+RWStructuredBuffer<float3> targetPos_Buffer;
+RWStructuredBuffer<float4x4> debug_Buffer;
+
+groupshared bool shTest[UNIT_COUNT];
+
+[numthreads(UNIT_COUNT, 1, 1)]
+void CS_TargetPos(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gIndex : SV_GroupIndex)
+{
+    uint id0 = gid.x;
+    uint id1 = gtid.x;
+    int i = 0;
+    
+    bool ba0 = active_Buffer[id0] == 1 ? true : false;
+    bool ba1 = active_Buffer[id1] == 1 ? true : false;
+    
+    int state0 = state_Buffer[id0];
+    int state1 = state_Buffer[id1];
+        
+    float3 tPos = float3(0.0f, 0.0f, 0.0f);
+    float4x4 W;
+    float r;
+        
+    shTest[id1] = false;
+    
+    GroupMemoryBarrierWithGroupSync();          
+    
+    if (0 <= id1 && id1 < count)
+    {
+        tPos = targetPos_Buffer[id0];
+        float4 c0 = circle_Buffer[id0];
+        c0.xyz = tPos;
+        c0.y = 0.0f;
+        c0.w *= 1.15f;
+    
+        float4 c1 = circle_Buffer[id1];
+        c1.y = 0.0f;
+        c1.w *= 1.15f;
+       
+        bool bTest = false;
+               
+        //if ((id0 != id1) && (ba0 && ba1))
+        if ((id0 != id1) && ((ba0 && ba1) || state0 == 5))  // state0 == 5 is ReSpawn state
+        {
+            if (distance(c0.xyz, c1.xyz) <= (c0.w + c1.w))
+            {
+                bTest = true;
+            }
+        }
+        
+        shTest[id1] = bTest;
+    }
+        
+    GroupMemoryBarrierWithGroupSync();
+
+    if (id1 == 0)
+    {
+        bool bTest = false;
+                
+        W = trW_Buffer[id0];
+        float4 c = circle_Buffer[id0];
+        
+        r = c.w;
+        float3 posW = c.xyz;        
+
+        [loop]
+        for (i = 0; i < count; i++)
+        {
+            if (shTest[i] == true)
+            {
+                bTest = true;
+                break;
+            }
+        }
+        
+        if (bTest)
+        {
+            float3 offsetVec = mul((float3x3) W, block_Buffer[random_Buffer[id0]] * r * 0.2f);
+           
+            tPos = tPos + offsetVec;
+        }
+        
+        uint2 posT = Terrain::GetHMapPos(tPos, T, t1_t0.xy);
+        //uint2 posT1 = Terrain::GetHMapPos(posW, T, t1_t0.xy);
+        
+        if (Terrain::isOutNV(posT, alphaTex) || Terrain::isOutNV_Hole(posT, holeTex))
+        {
+            //float3 refPos = refTargetPos_Buffer[id0];
+                           
+            //tPos = 2.0f * refPos - tPos;    //tPos = refPos + (refPos - tPos);      
+            
+            float3 p0 = posW;
+            float3 p1 = tPos;
+            p0.y = 0.0f;
+            p1.y = 0.0f;
+            if (distance(p0, p1) > 0.001f)
+            //if (distance(p0, p1) > 0.001f)
+            {
+                tPos = tPos + 0.5f * normalize(p0 - p1);                               
+                //tPos = tPos + 1.0f * normalize(p0 - p1);
+            }
+            else
+            {
+                tPos = posW;                                
+            }
+            
+            //tPos = 0.5f * tPos + 0.5f * refPos;
+                                    
+            posT = Terrain::GetHMapPos(tPos, T, t1_t0.xy);
+            tPos.y = Terrain::GetNomH(posT, normalHeight_Tex).w;
+            
+            //if (distance(posW, tPos) > 0.1f)
+            //{
+            //    tPos = tPos + 2.0f * normalize(posW - tPos);
+            //}
+        }
+        else
+        {
+            tPos.y = Terrain::GetNomH(posT, normalHeight_Tex).w;
+        }
+        
+        //tPos = float3(10.0f, 20.0f, 30.0f);
+        targetPos_Buffer[id0] = tPos;
+        
+        //{
+        //    float4x4 dMat = f4x4Zero;
+        //    dMat.v4c0.x = bTest ? 1.0f : -1.0f;
+        //    debug_Buffer[id0].v4c0.x = dMat;
+        //}
+        
+        //{
+        //    float4x4 dMat = f4x4Zero;
+        //    dMat = W;
+        //    debug_Buffer[id0] = dMat;
+        //}
+    }
+}
+
+
+StructuredBuffer<float4> unitData_Buffer;
+
+RWStructuredBuffer<float4> minDist_Buffer;
+
+groupshared float4 shMinDist[UNIT_COUNT];
+
+[numthreads(UNIT_COUNT, 1, 1)]
+void CS_TargetEnemy(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint id0 = gid.x;
+    uint id1 = gtid.x;
+    
+    bool ba0 = active_Buffer[id0] == 1 ? true : false;
+    bool ba1 = active_Buffer[id1] == 1 ? true : false;
+    
+    float3 pos0 = circle_Buffer[id0].xyz;
+    float3 pos1 = circle_Buffer[id1].xyz;
+    
+    int pnum0 = (int) unitData_Buffer[id0].x;
+    int pnum1 = (int) unitData_Buffer[id1].x;
+    
+    shMinDist[id1].x = id1;
+    shMinDist[id1].y = 0.0f;
+    shMinDist[id1].z = -1.0f;
+    shMinDist[id1].w = 0.0f;
+    
+    if (0 <= id1 && id1 < count)
+    {
+        if ((id0 != id1) && (ba0 && ba1) && (pnum0 != pnum1))
+        {
+            shMinDist[id1].y = distance(pos0, pos1);
+            shMinDist[id1].z = 1.0f;
+        }
+    }
+            
+    GroupMemoryBarrierWithGroupSync();
+    
+    
+    uint i = 0;
+    [loop]
+        
+    if (id0 < count)
+    {
+        for (i = 0; i < BINARY_COUNT; i++)
+        {
+            if (id1 % (uint) pow(2.0f, (float) (i + 1)) == 0)
+            {
+                uint offset = (uint) pow(2.0f, (float) (i));
+                uint a = id1;
+                uint b = a + offset;
+            
+                float d0 = shMinDist[a].y;
+                float d1 = shMinDist[b].y;
+            
+                float e0 = shMinDist[a].z;
+                float e1 = shMinDist[b].z;
+            
+                if (e0 < 0.0f)
+                {
+                    shMinDist[a] = shMinDist[b];
+                }
+                else
+                {
+                    if (d0 > d1 && e1 > 0.0f)
+                    {
+                        shMinDist[a] = shMinDist[b];
+                    }
+                }
+            }
+        
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+    
+    if (id1 == 0)
+    {
+        float4 minDist = shMinDist[0];
+        float viewDist = unitData_Buffer[id0].y;
+        if (minDist.y > viewDist)
+        {
+            minDist.z = -1.0f;
+        }
+        
+        minDist_Buffer[id0] = minDist;
+    }
+}
+
+
+
+
+
+
+
+//Test
+float SampleHMap(uint3 id, Texture2D tex, float hy)
+{
+    float h;
+    
+    h = 0.25f * (
+        tex[id.xz + uint2(0.0f, 0.0f)] +
+        tex[id.xz + uint2(1.0f, 0.0f)] +
+        tex[id.xz + uint2(0.0f, 1.0f)] +
+        tex[id.xz + uint2(1.0f, 1.0f)]);
+    
+    h = hy * h;
+    
+    return h;
+}
+
+float3 SampleHMapNormal(uint3 id, Texture2D tex, float3 tSize, float hy)
+{
+    float3 n;
+    
+    float h[2][2];
+    int i = 0;
+    int j = 0;
+    for (i = 0; i < 2; i++)
+    {
+        for (j = 0; j < 2; j++)
+        {
+            h[i][j] = hy * tex[id.xz + uint2(i, j)];
+        }
+    }
+    
+    float3 pos[2][2];
+    float x0 = 0.0f;
+    float z0 = 0.0f;
+    float x1 = tSize.x;
+    float z1 = tSize.z;
+    pos[0][0] = float3(x0, h[0][0], z0);
+    pos[0][1] = float3(x0, h[0][1], z1);
+    pos[1][1] = float3(x1, h[1][1], z1);
+    pos[1][0] = float3(x1, h[1][0], z0);
+    
+    float3 nom[2][2];
+    
+    nom[0][0] = normalize(cross((pos[0][1] - pos[0][0]), (pos[1][0] - pos[0][0])));
+    nom[0][1] = normalize(cross((pos[1][0] - pos[0][1]), (pos[0][0] - pos[0][1])));
+    nom[1][1] = normalize(cross((pos[1][0] - pos[1][1]), (pos[0][1] - pos[1][1])));
+    nom[1][0] = normalize(cross((pos[0][0] - pos[1][0]), (pos[1][1] - pos[1][0])));
+       
+    n = normalize(0.25f * (nom[0][0] + nom[0][1] + nom[1][1] + nom[1][0]));
+    
+    return n;
+}
+
+float3 dpCount;
+Texture2D hMap;
+
+RWTexture3D<float4> _normalHeight_Tex;
+
+[numthreads(16, 1, 16)]
+void CS_NH(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gIndex : SV_GroupIndex)
+{
+    float h = SampleHMap(dtid, hMap, terrainSize.y);
+    float3 n = SampleHMapNormal(dtid, hMap, (terrainSize.xyz / dpCount), terrainSize.y);
+    
+    _normalHeight_Tex[dtid] = float4(n, h);
+}
+

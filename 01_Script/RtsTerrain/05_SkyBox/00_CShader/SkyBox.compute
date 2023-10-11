@@ -1,0 +1,74 @@
+#pragma kernel CS_WorldVertex
+
+#define maxVertexCount 4
+
+struct VertexIn
+{
+    float4 posL;
+    float4 normalL;
+    float4 tangentL;
+    float4 boneI;
+    float4 boneW;
+};
+
+struct VertexOut
+{
+    float4 posW;
+    float4 normalW;
+    float4 tangentW;
+};
+
+float4 countInfo;
+
+StructuredBuffer<VertexIn> vIn;
+StructuredBuffer<float4x4> bone;
+StructuredBuffer<float4x4> boneIT;
+
+RWStructuredBuffer<VertexOut> vOut;
+
+
+[numthreads(maxVertexCount, 1, 1)]
+void CS_WorldVertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{
+    uint vtxCount = (uint) countInfo[0];
+    //uint dvCount = (uint) countInfo[1];
+    
+    int i = 0;
+    uint iid = gid.x;
+    uint vgid = gid.y;
+    float3 posW = float3(0.0f, 0.0f, 0.0f);
+    float3 normalW = float3(0.0f, 0.0f, 0.0f);
+    float3 tangentW = float3(0.0f, 0.0f, 0.0f);
+    
+    uint vtxIdx = vgid * maxVertexCount + gtid.x;
+                  
+    if (vtxIdx < vtxCount)
+    {
+        VertexIn vin = vIn[vtxIdx];
+                
+        {
+            uint idxIn = iid;
+            float4x4 W = bone[idxIn];
+            float3x3 W_IT = (float3x3) boneIT[idxIn];
+            
+            //W = f4x4I;
+            
+            posW = mul(W, float4(vin.posL.xyz, 1.0f)).xyz;
+            normalW = mul(W_IT, vin.normalL.xyz);
+            tangentW = mul(W_IT, vin.tangentL.xyz);
+        }
+
+        uint idxOut = iid * vtxCount + vgid * maxVertexCount + gtid.x;
+        
+        VertexOut vout;
+        vout.posW = float4(posW, 1.0f);
+        vout.normalW = float4(normalW, 0.0f);
+        vout.tangentW = float4(tangentW, 0.0f);
+                
+        //{
+        //    vout.posW = float4(vin.posL.xyz, 1.0f);        
+        //}
+        
+        vOut[idxOut] = vout;
+    }
+}

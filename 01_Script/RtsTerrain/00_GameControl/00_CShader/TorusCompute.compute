@@ -1,0 +1,76 @@
+#include "../../../Utility/00_CShader/UtilityCS.hlsl"
+
+#pragma kernel CS_trW
+#pragma kernel CS_Vertex;
+#define TORUS_U_NUM 24
+#define TORUS_V_NUM 24
+
+struct Vertex
+{
+    float3 pos;
+    float3 nom;
+};
+
+float4 t1_t0;
+float4x4 T;
+
+Texture3D<float4> normalHeight_Tex;
+
+StructuredBuffer<float4x4> trW_In_Buffer;
+RWStructuredBuffer<float4x4> trW_Out_Buffer;
+
+[numthreads(64, 1, 1)]
+void CS_trW(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint idx = gid.x * 64 + gtid.x;
+    
+    float4x4 trW_In = trW_In_Buffer[idx];
+    float4x4 trW_Out = f4x4Zero;
+    
+    float3 pos = trW_In.v3c0;
+    float4 rot = trW_In.v4c1;
+    float3 sca = trW_In.v3c2;
+    float3 offset = trW_In.v3c3;
+    
+    pos = pos + offset;
+    
+    {
+        uint2 posT = Terrain::GetHMapPos(pos, T, t1_t0.xy);
+        float3 nom = Terrain::GetNomH(posT, normalHeight_Tex).xyz;      
+    
+        float3 yaxis = normalize(nom);
+        float3 xaxis = cross(yaxis, Quaternion::rotate(rot, float3(0.0f, 0.0f, 1.0f)));
+        float3 zaxis = cross(xaxis, yaxis);
+
+        rot = Quaternion::fromMat(xaxis, yaxis, zaxis);
+    }   
+    float3x3 R = Quaternion::toMat(rot);
+    
+    trW_Out.v4c0 = float4(sca.x * R.v3c0, 0.0f);
+    trW_Out.v4c1 = float4(sca.y * R.v3c1, 0.0f);
+    trW_Out.v4c2 = float4(sca.z * R.v3c2, 0.0f);
+    trW_Out.v4c3 = float4(pos, 1.0f);
+         
+    
+    trW_Out_Buffer[idx] = trW_Out;
+}
+
+StructuredBuffer<Vertex> vertex_In_Buffer;
+RWStructuredBuffer<Vertex> vertex_Out_Buffer;
+
+[numthreads(TORUS_V_NUM, TORUS_U_NUM, 1)]
+void CS_Vertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint id_in = gtid.x * TORUS_U_NUM + gtid.y;
+    uint id_out = gid.x * TORUS_V_NUM * TORUS_U_NUM + id_in;
+    
+    Vertex vIn = vertex_In_Buffer[id_in];
+    Vertex vOut;
+    
+    float4x4 W = trW_Out_Buffer[gid.x];
+    
+    vOut.pos = mul(W, float4(vIn.pos, 1.0f)).xyz;
+    vOut.nom = mul((float3x3) W, vIn.nom);
+
+    vertex_Out_Buffer[id_out] = vOut;
+}

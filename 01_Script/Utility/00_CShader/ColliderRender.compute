@@ -1,0 +1,227 @@
+#include "../../Utility/00_CShader/UtilityCS.hlsl"
+
+#pragma kernel CS_Box_W
+#pragma kernel CS_Sphere_W
+#pragma kernel CS_Capsule_W
+#pragma kernel CS_Cylinder_W
+
+float4 countInfo;
+
+StructuredBuffer<float4x4> data0_Buffer;
+StructuredBuffer<float4x4> data1_Buffer;
+
+RWStructuredBuffer<float4x4> W0_Buffer;
+RWStructuredBuffer<float4x4> W1_Buffer;
+RWStructuredBuffer<float4x4> W2_Buffer;
+
+[numthreads(64, 1, 1)]
+void CS_Box_W(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint insCount = (uint) countInfo.x;
+
+    uint idx = gid.x * 64 + gtid.x;
+
+    if (idx < insCount)
+    {
+        float4x4 data0 = data0_Buffer[idx];
+        float3 c = data0.v3c0;
+        float3 size = data0.v3c1;
+
+        float4x4 data1 = data1_Buffer[idx];
+        float3 pos = data1.v3c0;
+        float4 rot = data1.v4c1;
+        float3 sca = data1.v3c2;
+
+        float3 s = 1.0f;
+
+        float3x3 R = Quaternion::toMat(rot);
+
+        {
+            s = size * sca;
+        }
+
+        //
+        float4x4 W = f4x4I;
+
+        W.v4c0 = float4(s.x * R.v3c0, 0.0f);
+        W.v4c1 = float4(s.y * R.v3c1, 0.0f);
+        W.v4c2 = float4(s.z * R.v3c2, 0.0f);
+        W.v4c3 = float4(pos + mul(R, sca * c), 1.0f);
+
+        W0_Buffer[idx] = W;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CS_Sphere_W(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint insCount = (uint) countInfo.x;
+
+    uint idx = gid.x * 64 + gtid.x;
+
+    if (idx < insCount)
+    {
+        float4x4 data0 = data0_Buffer[idx];
+        float3 c = data0.v3c0;
+        float r = data0.v4c0.w;
+
+        float4x4 data1 = data1_Buffer[idx];
+        float3 pos = data1.v3c0;
+        float4 rot = data1.v4c1;
+        float3 sca = data1.v3c2;
+
+        float s = 1.0f;
+
+        float3x3 R = Quaternion::toMat(rot);
+
+        {
+            s = r * max(sca.x, max(sca.y, sca.z));
+        }
+
+        //
+        float4x4 W = f4x4I;
+
+        W.v4c0 = float4(s * R.v3c0, 0.0f);
+        W.v4c1 = float4(s * R.v3c1, 0.0f);
+        W.v4c2 = float4(s * R.v3c2, 0.0f);
+        W.v4c3 = float4(pos + mul(R, sca * c), 1.0f);
+
+        W0_Buffer[idx] = W;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CS_Capsule_W (uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint insCount = (uint) countInfo.x;
+    
+    uint idx = gid.x * 64 + gtid.x;
+    
+    if(idx < insCount)
+    {
+        float4x4 data0 = data0_Buffer[idx];
+        float3 c = data0.v3c0;
+        int d = (int) data0.v4c1.x;
+        float r = data0.v4c1.y;
+        float h = data0.v4c1.z;
+        float hh = data0.v4c1.w;
+    
+        float4x4 data1 = data1_Buffer[idx];
+        float3 pos = data1.v3c0;
+        float4 rot = data1.v4c1;
+        float3 sca = data1.v3c2;
+    
+        float s = 1.0f;
+    
+        float3x3 R = Quaternion::toMat(rot);
+        float3x3 R0 = f3x3I;
+        if (d == 0)
+        {
+            s = max(sca.y, sca.z);
+            r = r * s;
+            h = h * sca.x;
+
+            R0 = Quaternion::toMat(Quaternion::mul(rot, Quaternion::axisAngle(float3(0.0f, 0.0f, 1.0f), radians(-90.0f))));
+        }
+        else if (d == 1)
+        {
+            s = max(sca.x, sca.z);
+            r = r * s;
+            h = h * sca.y;
+
+            R0 = R;
+        }
+        else if (d == 2)
+        {
+            s = max(sca.x, sca.y);
+            r = r * s;
+            h = h * sca.z;
+
+            R0 = Quaternion::toMat(Quaternion::mul(rot, Quaternion::axisAngle(float3(1.0f, 0.0f, 0.0f), radians(+90.0f))));
+        }
+    
+        //
+        float4x4 W = f4x4I;
+    
+        W.v4c0 = float4(R0.v3c0, 0.0f);
+        W.v4c1 = float4(R0.v3c1, 0.0f);
+        W.v4c2 = float4(R0.v3c2, 0.0f);
+        W.v4c3 = float4(pos + mul(R, sca * c), 1.0f);
+    
+        float4x4 W0 = f4x4I;
+        float4x4 W1 = f4x4I;
+        float4x4 W2 = f4x4I;
+        
+        //h = 4.0f;
+        {
+            hh = 0.5f * h - r;
+            if(hh < 0.0f)
+            {
+                hh = 0.0f;
+            }
+        }
+    
+        {
+            W.v3c0 *= r;
+            W.v3c2 *= r;
+    
+            W0 = W;
+            W0.v3c3 += (W0.v3c1 * hh);
+            W0.v3c1 *= r;
+                
+            W1 = W;
+            W1.v3c1 *= hh;            
+    
+            W2 = W;
+            W2.v3c3 -= (W2.v3c1 * hh);
+            W2.v3c1 *= r;            
+        }
+    
+        W0_Buffer[idx] = W0;
+        W1_Buffer[idx] = W1;
+        W2_Buffer[idx] = W2;
+    
+    }        
+}
+
+[numthreads(64, 1, 1)]
+void CS_Cylinder_W(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gidx : SV_GroupIndex)
+{
+    uint insCount = (uint) countInfo.x;
+
+    uint idx = gid.x * 64 + gtid.x;
+
+    if (idx < insCount)
+    {
+        float4x4 data0 = data0_Buffer[idx];        
+        float offset = data0.v4c0.x;
+        float r = data0.v4c0.y;
+        float h = data0.v4c0.z;
+        
+
+        float4x4 data1 = data1_Buffer[idx];
+        float3 pos = data1.v3c0;
+        float4 rot = data1.v4c1;
+        float3 sca = data1.v3c2;
+
+        float s = 1.0f;               
+
+        float3 yaxis = Quaternion::rotate(rot, float3(0.0f, 1.0f, 0.0f));
+        {
+            r = r * max(sca.x, sca.z);
+            h = h * sca.y;
+            //offset = (-offset + 1.0f) * sca.y;
+            offset *= -sca.y;
+        }
+
+        //
+        float4x4 W = f4x4I;
+
+        W.v4c0 = float4(r * float3(1.0f, 0.0f, 0.0f), 0.0f);
+        W.v4c1 = float4(h * float3(0.0f, 1.0f, 0.0f), 0.0f);
+        W.v4c2 = float4(r * float3(0.0f, 0.0f, 1.0f), 0.0f);       
+        W.v4c3 = float4(pos + yaxis * offset, 1.0f);
+
+        W0_Buffer[idx] = W;
+    }
+}

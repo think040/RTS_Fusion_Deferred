@@ -1,0 +1,568 @@
+#include "../../../Utility/00_CShader/UtilityCS.hlsl"
+
+#pragma kernel CS_Bone
+#pragma kernel CS_WorldVertex
+
+#pragma kernel CS_PVF_Vertex
+#pragma kernel CS_PVF_Vertex_Wire
+
+#pragma kernel CS_PVF_Cull
+
+#define maxVertexCount 24
+
+StructuredBuffer<float4x4> trM_Buffer;
+
+RWStructuredBuffer<float4x4> W_Buffer;
+RWStructuredBuffer<float4x4> Wn_Buffer;
+RWStructuredBuffer<float4x4> Wi_Buffer;
+
+[numthreads(64, 1, 1)]
+void CS_Bone(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{
+    uint idx = gid.x * 64 + gtid.x;
+       
+    float4x4 M = trM_Buffer[idx];
+       
+    float3 pos = M.v3c0;
+    float4 rot = M.v4c1;
+    float3 sca = M.v3c2;
+    
+    float4x4 W;
+    float4x4 Wn;      
+    float4x4 Wi;
+    
+    {
+        float3x3 R = Quaternion::toMat(rot);       
+        float3 si = 1.0f / sca;
+        
+        W.v4c0 = float4(sca.x * R.v3c0, 0.0f);
+        W.v4c1 = float4(sca.y * R.v3c1, 0.0f);
+        W.v4c2 = float4(sca.z * R.v3c2, 0.0f);
+        W.v4c3 = float4(pos, 1.0f);
+        
+        Wn.v4c0 = float4(si.x * R.v3c0, 0.0f);
+        Wn.v4c1 = float4(si.y * R.v3c1, 0.0f);
+        Wn.v4c2 = float4(si.z * R.v3c2, 0.0f);
+        Wn.v4c3 = float4(0.0f, 0.0f, 0.0f, 0.0f);
+          
+        float3 vec = -float3(dot(pos, Wn.v3c0), dot(pos, Wn.v3c1), dot(pos, Wn.v3c2));
+        Wi.v4r0 = float4(Wn.v3c0, vec.x);
+        Wi.v4r1 = float4(Wn.v3c1, vec.y);
+        Wi.v4r2 = float4(Wn.v3c2, vec.z);
+        Wi.v4r3 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+    
+    {
+        W_Buffer[idx] = W;
+        Wn_Buffer[idx] = Wn;
+        Wi_Buffer[idx] = Wi;
+    }
+}
+
+
+struct VertexIn
+{
+    float4 posL;
+    float4 normalL;
+    float4 tangentL;
+    float4 boneI;
+    float4 boneW;
+};
+
+struct VertexOut
+{
+    float4 posW;
+    float4 normalW;
+    float4 tangentW;
+};
+
+float4 countInfo;
+
+StructuredBuffer<VertexIn> vIn;
+StructuredBuffer<float4x4> bone;
+StructuredBuffer<float4x4> boneIT;
+
+RWStructuredBuffer<VertexOut> vOut;
+
+
+[numthreads(maxVertexCount, 1, 1)]
+void CS_WorldVertex(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint gindex : SV_GroupIndex)
+{
+    uint vtxCount = (uint) countInfo[0];
+    //uint dvCount = (uint) countInfo[1];
+    
+    int i = 0;
+    uint iid = gid.x;
+    uint vgid = gid.y;
+    float3 posW = float3(0.0f, 0.0f, 0.0f);
+    float3 normalW = float3(0.0f, 0.0f, 0.0f);
+    float3 tangentW = float3(0.0f, 0.0f, 0.0f);
+    
+    uint vtxIdx = vgid * maxVertexCount + gtid.x;
+                  
+    if (vtxIdx < vtxCount)
+    {
+        VertexIn vin = vIn[vtxIdx];
+                
+        {
+            uint idxIn = iid;
+            float4x4 W = bone[idxIn];
+            float3x3 W_IT = (float3x3) boneIT[idxIn];
+            
+            //W = f4x4I;
+            
+            posW = mul(W, float4(vin.posL.xyz, 1.0f)).xyz;
+            normalW = mul(W_IT, vin.normalL.xyz);
+            tangentW = mul(W_IT, vin.tangentL.xyz);
+        }
+
+        uint idxOut = iid * vtxCount + vgid * maxVertexCount + gtid.x;
+        
+        VertexOut vout;
+        vout.posW = float4(posW, 1.0f);
+        vout.normalW = float4(normalW, 0.0f);
+        vout.tangentW = float4(tangentW, 0.0f);
+                
+        //{
+        //    vout.posW = float4(vin.posL.xyz, 1.0f);        
+        //}
+        
+        vOut[idxOut] = vout;
+    }
+}
+
+
+//
+Buffer<float4> fis_Buffer;
+float4 bPos[24]; //[8] wire
+float4 bNormal[24];
+float4 bCenter[1];
+float4 bPlane[12];
+
+groupshared float4x4 _m;
+groupshared float3 _ns[4];
+
+
+RWStructuredBuffer<float4> pCenter_Buffer;
+RWTexture2D<float4> pPlane_Tex;
+RWTexture2D<float4> pPos_Tex;
+RWTexture2D<float4> pNormal_Tex;
+
+
+int pvfOffset;
+
+[numthreads(24, 1, 1)]
+void CS_PVF_Vertex(
+    uint3 dtid : SV_DispatchThreadID,
+    uint3 gid : SV_GroupID,
+    uint3 gtid : SV_GroupThreadID,
+    uint gindex : SV_GroupIndex)
+{
+    uint _gidx = pvfOffset + gid.x;
+        
+    if (gtid.x == 0)
+    {
+        float fov = fis_Buffer[_gidx].x;
+        float aspect = fis_Buffer[_gidx].y;
+        float near = fis_Buffer[_gidx].z;
+        float far = fis_Buffer[_gidx].w;
+        
+        float4x4 m = f4x4Zero;
+        m._m11 = tan(0.5f * radians(fov));
+        m._m00 = aspect * m._m11;
+        m._m22 = 0.0f;
+        m._m23 = 1.0f;
+        m._m32 = -(far - near) / (2 * far * near);
+        m._m33 = +(far + near) / (2 * far * near);
+
+        float3 nr = float3(+1.0f, +0.0f, -m._m00);
+        float3 nl = float3(-1.0f, +0.0f, -m._m00);
+        float3 nu = float3(+0.0f, +1.0f, -m._m11);
+        float3 nd = float3(+0.0f, -1.0f, -m._m11);
+        
+        float xn = m.v4c0.x * near;
+        float yn = m.v4c1.y * near;
+        float xf = m.v4c0.x * far;
+        float yf = m.v4c1.y * far;
+        
+        pCenter_Buffer[_gidx] = float4((1.0f / 8.0f) *
+           (float3(+xn, +yn, near) +
+            float3(-xn, +yn, near) +
+            float3(+xn, -yn, near) +
+            float3(-xn, -yn, near) +
+            float3(+xn, +yn, far) +
+            float3(-xn, +yn, far) +
+            float3(+xn, -yn, far) +
+            float3(-xn, -yn, far)), 0.0f);
+                
+        pPlane_Tex[int2(_gidx, 0)] = float4(nr, 0.0f);
+        pPlane_Tex[int2(_gidx, 1)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 2)] = float4(nl, 0.0f);
+        pPlane_Tex[int2(_gidx, 3)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 4)] = float4(nu, 0.0f);
+        pPlane_Tex[int2(_gidx, 5)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 6)] = float4(nd, 0.0f);
+        pPlane_Tex[int2(_gidx, 7)] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 8)] = float4(0.0f, 0.0f, +1.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 9)] = float4(0.0f, 0.0f, far, 0.0f);
+        pPlane_Tex[int2(_gidx, 10)] = float4(0.0f, 0.0f, -1.0f, 0.0f);
+        pPlane_Tex[int2(_gidx, 11)] = float4(0.0f, 0.0f, near, 0.0f);
+                       
+        _m = m;
+        
+        _ns[0] = nr;
+        _ns[1] = nl;
+        _ns[2] = nu;
+        _ns[3] = nd;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float3 v0 = bPos[gtid.x].xyz;
+        float3 v1;
+        
+        float4 vec = float4(2.0f * v0, 1.0f);
+        vec = mul(_m, vec);
+        vec = (1.0f / vec.w) * vec;
+        v1 = vec.xyz;
+               
+        pPos_Tex[int2(_gidx, gtid.x)] = float4(v1, 0.0f);
+    }
+    
+    {
+        float3 n0 = bNormal[gtid.x].xyz;
+        float3 n1 = n0;
+        
+        float3 nr = _ns[0];
+        float3 nl = _ns[1];
+        float3 nu = _ns[2];
+        float3 nd = _ns[3];
+        
+        if (dot(n1, float3(+1.0f, +0.0f, +0.0f)) > 0.0f)
+        {
+            n1 = nr;
+        }
+        else if (dot(n1, float3(-1.0f, +0.0f, +0.0f)) > 0.0f)
+        {
+            n1 = nl;
+        }
+        else if (dot(n1, float3(+0.0f, +1.0f, +0.0f)) > 0.0f)
+        {
+            n1 = nu;
+        }
+        else if (dot(n1, float3(+0.0f, -1.0f, +0.0f)) > 0.0f)
+        {
+            n1 = nd;
+        }
+                
+        pNormal_Tex[int2(_gidx, gtid.x)] = float4(n1, 0.0f);
+    }
+        
+}
+
+//Buffer<float4> fis_Buffer;
+float4 bPosWire[8];
+
+RWTexture2D<float4> pPosWire_Tex;
+
+
+[numthreads(8, 1, 1)]
+void CS_PVF_Vertex_Wire(
+    uint3 dtid : SV_DispatchThreadID,
+    uint3 gid : SV_GroupID,
+    uint3 gtid : SV_GroupThreadID,
+    uint gindex : SV_GroupIndex)
+{
+    uint _gidx = pvfOffset + gid.x;
+    
+    
+    if (gtid.x == 0)
+    {
+        float fov = fis_Buffer[_gidx].x;
+        float aspect = fis_Buffer[_gidx].y;
+        float near = fis_Buffer[_gidx].z;
+        float far = fis_Buffer[_gidx].w;
+        
+        float4x4 m = f4x4Zero;
+        m._m11 = tan(0.5f * radians(fov));
+        m._m00 = aspect * m._m11;
+        m._m22 = 0.0f;
+        m._m23 = 1.0f;
+        m._m32 = -(far - near) / (2 * far * near);
+        m._m33 = +(far + near) / (2 * far * near);
+                       
+        _m = m;
+    }
+    
+    GroupMemoryBarrierWithGroupSync();
+    
+    {
+        float3 v0 = bPosWire[gtid.x].xyz;
+        float3 v1;
+        
+        float4 vec = float4(2.0f * v0, 1.0f);
+        vec = mul(_m, vec);
+        vec = (1.0f / vec.w) * vec;
+        v1 = vec.xyz;
+               
+        pPosWire_Tex[int2(_gidx, gtid.x)] = float4(v1, 0.0f);
+    }
+}
+
+
+Buffer<int> hhIndex_Buffer;
+//float4 bCenter[1];
+//float4 bPlane[12];
+//float4 bPos[24]; 
+//RWTexture3D<float4> TileBoxData_Tex;
+//RWBuffer<float4> pCenter_Buffer;
+//RWTexture2D<float4> pPlane_Tex;
+//RWTexture2D<float4> pPos_Tex;
+
+StructuredBuffer<float4x4> pvfM_Buffer;
+StructuredBuffer<float4x4> boxData_Buffer;
+
+groupshared float4x4 Mat[2];
+groupshared float3x3 Rot[2];
+groupshared float4x4 AfrB_sh;
+groupshared float3x3 AfrBn_sh;
+groupshared float3x2 pl_sh[2][6];
+groupshared float3 cen_sh[2];
+groupshared int cenPlTest_sh[2][6];
+groupshared int groupTest_sh;
+
+RWTexture3D<float> TestCullPVF_Tex;
+
+
+//float pvfCount;
+//int pvfIdx;
+
+//groupshared bool bTested[7];
+
+
+[numthreads(12, 1, 12)]
+void CS_PVF_Cull(
+    uint3 dtid : SV_DispatchThreadID,
+    uint3 gid : SV_GroupID,
+    uint3 gtid : SV_GroupThreadID,
+    uint gindex : SV_GroupIndex)
+{
+    int _gidy = pvfOffset + gid.y;
+    
+    //int3 id0 = int3(gid.x / 2, (qtIdx - 1) * (int) pvfCount + (_gidy), gid.z / 2);
+    //int3 id1 = int3(gid.x, (qtIdx) * (int) pvfCount + (_gidy), gid.z);
+    
+    int3 id0 = int3(gid.x, (_gidy), gid.z);
+    int3 id1 = int3(gid.x, (_gidy), gid.z);
+    
+    //int3 id0 = int3(gid.x / 2, (qtIdx - 1) + gid.y, gid.z / 2);
+    //int3 id1 = int3(gid.x, (qtIdx) + gid.y, gid.z);
+    
+    
+    //if (gtid.x == 0 && gtid.z == 0)
+    //{
+    //    bTested[gid.y] = false;
+    //    TestCullPVF_Tex[id1] = 0.0f; //0.0f -1.0f : culled  // 1.0f : non-culled
+    //
+    //    if (qtIdx > 0)
+    //    {
+    //        if (TestCullPVF_Tex[id0] < 1)
+    //        {
+    //            bTested[gid.y] = true;
+    //            TestCullPVF_Tex[id1] = -1.0f;
+    //        }
+    //    }
+    //}
+    //
+    GroupMemoryBarrierWithGroupSync();
+    
+    //if (!bTested[gid.y])
+    {
+        if (gtid.x == 0 && gtid.y == 0 && gtid.z == 0)
+        {
+            float4x4 Mi;
+            float4x4 Mj;
+            //int xp = gid.x;
+            //int yp = _gidy;
+            //int zp = gid.z;
+                       
+            Mat[0].v3c0 = pvfM_Buffer[_gidy].v3c0.xyz;
+            Mat[0].v4c1 = pvfM_Buffer[_gidy].v4c1.xyzw;
+            Mat[0].v3c2 = pvfM_Buffer[_gidy].v3c2.xyz;
+                
+            //Mat[1].v3c0 = TileBoxData_Tex.Load(int4(xp, qtIdx * 4 + 0, zp, 0)).xyz;
+            //Mat[1].v4c1 = TileBoxData_Tex.Load(int4(xp, qtIdx * 4 + 1, zp, 0)).xyzw;
+            //Mat[1].v3c2 = TileBoxData_Tex.Load(int4(xp, qtIdx * 4 + 2, zp, 0)).xyz;
+            
+            Mat[1].v3c0 = boxData_Buffer[gid.x].v3c0;
+            Mat[1].v4c1 = boxData_Buffer[gid.x].v4c1;
+            Mat[1].v3c2 = boxData_Buffer[gid.x].v3c2;
+        }
+     
+        GroupMemoryBarrierWithGroupSync();
+    
+        if (gtid.x < 2 && gtid.y == 0 && gtid.z == 0)
+        {
+            Rot[gtid.x] = Quaternion::GetRotMatrix(Mat[gtid.x].v4c1);
+        }
+    
+        GroupMemoryBarrierWithGroupSync();
+    
+        if (gtid.x == 0 && gtid.y == 0 && gtid.z == 0)
+        {
+            float4x4 A;
+            float4x4 B;
+				
+            float3 ta = Mat[0].v3c0;
+            float3 tb = Mat[1].v3c0;
+            float4 qa = Mat[0].v4c1;
+            float4 qb = Mat[1].v4c1;
+            float3 sa = Mat[0].v3c2;
+            float3 sb = Mat[1].v3c2;
+                                                              
+		//A
+            float3 sai = 1.0f / sa;
+            A.v3r0 = (sai.x) * Rot[0].v3c0;
+            A.v3r1 = (sai.y) * Rot[0].v3c1;
+            A.v3r2 = (sai.z) * Rot[0].v3c2;
+            A.v3r3 = float3(0.0f, 0.0f, 0.0f);
+
+            A.v4c3.x = dot(A.v3r0, -ta);
+            A.v4c3.y = dot(A.v3r1, -ta);
+            A.v4c3.z = dot(A.v3r2, -ta);
+            A.v4c3.w = 1.0f;
+		
+		//B
+            B.v4c0 = float4(sb.x * Rot[1].v3c0, 0.0f);
+            B.v4c1 = float4(sb.y * Rot[1].v3c1, 0.0f);
+            B.v4c2 = float4(sb.z * Rot[1].v3c2, 0.0f);
+            B.v4c3 = float4(tb, 1.0f);
+
+            AfrB_sh = mul(A, B);
+        }
+        else if (gtid.x == 1 && gtid.y == 0 && gtid.z == 0)
+        {
+        ////AfromBn        
+            float3x3 An;
+            float3x3 Bn;
+        
+            float3 ta = Mat[0].v3c0;
+            float3 tb = Mat[1].v3c0;
+            float4 qa = Mat[0].v4c1;
+            float4 qb = Mat[1].v4c1;
+            float3 sa = Mat[0].v3c2;
+            float3 sb = Mat[1].v3c2;
+				
+		//A
+            An.v3r0 = (sa.x) * Rot[0].v3c0;
+            An.v3r1 = (sa.y) * Rot[0].v3c1;
+            An.v3r2 = (sa.z) * Rot[0].v3c2;
+		
+		//B
+            float3 sbi = 1.0 / sb;
+            Bn.v3c0 = float3(sbi.x * Rot[1].v3c0);
+            Bn.v3c1 = float3(sbi.y * Rot[1].v3c1);
+            Bn.v3c2 = float3(sbi.z * Rot[1].v3c2);
+
+            AfrBn_sh = mul(An, Bn);
+        }
+    
+        GroupMemoryBarrierWithGroupSync();
+        
+        if (gtid.x == 0 && gtid.y == 0 && gtid.z == 0)
+        {
+                
+            cen_sh[0] = (mul(AfrB_sh, float4(bCenter[0].xyz, 1.0f))).xyz;
+            cen_sh[1] = pCenter_Buffer[_gidy].xyz;
+        }
+    
+        GroupMemoryBarrierWithGroupSync();
+     
+        if (gtid.x < 6 && gtid.y == 0 && gtid.z)
+        {
+            int n = gtid.x;
+            pl_sh[0][n].v3c0 =
+            pPlane_Tex[int2(_gidy, n * 2 + 0)].xyz;
+            pl_sh[0][n].v3c1 =
+            pPlane_Tex[int2(_gidy, n * 2 + 1)].xyz;
+            pl_sh[1][n].v3c0 =
+			mul(AfrBn_sh, bPlane[2 * n + 0].xyz);
+            pl_sh[1][n].v3c1 =
+			mul(AfrB_sh, float4(bPlane[2 * n + 1].xyz, 1.0f)).xyz;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    
+        if ((gtid.x >= 0 && gtid.x < 2) && (gtid.z >= 0 && gtid.z < 6))
+        {
+            if (Plane::TestPointToPlaneInOut(
+			cen_sh[gtid.x], pl_sh[gtid.x][gtid.z]))
+            {
+                cenPlTest_sh[gtid.x][gtid.z] = 1;
+            }
+            else
+            {
+                cenPlTest_sh[gtid.x][gtid.z] = 0;
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        if (gtid.x == 0 & gtid.z == 0)
+        {
+            int testA = 0;
+            for (int a = 0; a < 6; a++)
+            {
+                if (cenPlTest_sh[0][a] == 1)
+                {
+                    testA = testA + 1;
+                }
+            }
+
+            int testB = 0;
+            for (int b = 0; b < 6; b++)
+            {
+                if (cenPlTest_sh[1][b] == 1)
+                {
+                    testB = testB + 1;
+                }
+            }
+        
+            groupTest_sh = 0;
+            TestCullPVF_Tex[id1] = 0.0f;
+            if ((testA == 6) || (testB == 6))
+            {
+                groupTest_sh = 1;
+                TestCullPVF_Tex[id1] = 1.0f;
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+            
+        if (groupTest_sh == 0)
+        {
+            float3x3 triA;
+            float3x3 triB;
+            float4x4 AfromB;
+
+            int indexA = 3 * gtid.x;
+            triA.v3c0 = pPos_Tex[int2(_gidy, hhIndex_Buffer[indexA + 0])].xyz;
+            triA.v3c1 = pPos_Tex[int2(_gidy, hhIndex_Buffer[indexA + 1])].xyz;
+            triA.v3c2 = pPos_Tex[int2(_gidy, hhIndex_Buffer[indexA + 2])].xyz;
+
+            int indexB = 3 * gtid.z;
+            triB.v3c0 = bPos[hhIndex_Buffer[indexB + 0]].xyz;
+            triB.v3c1 = bPos[hhIndex_Buffer[indexB + 1]].xyz;
+            triB.v3c2 = bPos[hhIndex_Buffer[indexB + 2]].xyz;
+
+            AfromB = AfrB_sh;
+        
+            if (Triangle::TestTriangleToTriangleSimple(triA, triB, AfromB))
+            {
+                groupTest_sh = 1;
+                TestCullPVF_Tex[id1] = 1.0f;
+            }
+        }
+    }
+}
